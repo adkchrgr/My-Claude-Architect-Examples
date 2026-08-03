@@ -1,0 +1,6 @@
+# Requires Python 3.10+
+#
+# Only direct dependency of main.py. The Claude Code CLI is bundled with this
+# package, so no separate `claude` install is needed. Transitive deps pulled in
+# automatically: anyio, mcp, sniffio, typing-extensions (Python < 3.11 only).
+claude-agent-sdk>=0.2.128
