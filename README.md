@@ -6,18 +6,30 @@ Runnable Python experiments exploring how Claude-based applications behave beyon
 
 I'm building these while working through Claude architecture material. The goal is not simply to complete exercises, but to understand the control flow, failure modes, and engineering tradeoffs involved in building reliable agentic systems.
 
+## Repository Layout
+
+```text
+.
+├── examples/        # runnable Claude/API architecture examples
+├── tests/           # deterministic unit tests
+├── pyproject.toml   # pytest + Ruff configuration
+├── requirements.txt
+├── requirements-dev.txt
+└── .env.example     # local configuration template; never contains a real key
+```
+
 ## What This Repository Covers
 
 | Pattern | Example | Key Concept |
 | --- | --- | --- |
-| Basic API usage | `MCAE-Work/anthropic_sdk_test/` | Messages API and model discovery |
-| Tool use | `MCAE-Work/stop_reason/` | `tool_use`, `tool_result`, and `end_turn` |
-| External tools | `MCAE-Work/weather_example.py` | Combining Claude with a real HTTP API |
-| Loop control | `MCAE-Work/end_loop_correctly/` | Stop conditions and max-iteration safeguards |
-| Code-driven routing | `MCAE-Work/decision_making/code-driven.py` | Application controls the branch |
-| Model-driven routing | `MCAE-Work/decision_making/model-driven.py` | Model chooses tools dynamically |
-| Coordinator/workers | `MCAE-Work/coordinator-agent_basic/` | Async worker fan-out and aggregation |
-| Task decomposition | `MCAE-Work/narrow_task_decomposition/` | Draft → audit → expand → dispatch |
+| Basic API usage | `examples/anthropic_sdk_test/` | Messages API and model discovery |
+| Tool use | `examples/stop_reason/` | `tool_use`, `tool_result`, and `end_turn` |
+| External tools | `examples/weather_example.py` | Combining Claude with a real HTTP API |
+| Loop control | `examples/end_loop_correctly/` | Stop conditions and max-iteration safeguards |
+| Code-driven routing | `examples/decision_making/code-driven.py` | Application controls the branch |
+| Model-driven routing | `examples/decision_making/model-driven.py` | Model chooses tools dynamically |
+| Coordinator/workers | `examples/coordinator-agent_basic/` | Async worker fan-out and aggregation |
+| Task decomposition | `examples/narrow_task_decomposition/` | Validated, bounded decomposition and dispatch |
 
 ## Design Principles I'm Exploring
 
@@ -40,15 +52,16 @@ git clone https://github.com/adkchrgr/My-Claude-Architect-Examples.git
 cd My-Claude-Architect-Examples
 python -m venv .venv
 source .venv/bin/activate
-pip install -r MCAE-Work/requirements.txt
+pip install -r requirements.txt
+cp .env.example .env
 ```
 
-Set your Anthropic API key in your environment or local `.env` file before running API examples. `.env` is excluded from version control.
+Edit `.env` and set your own `ANTHROPIC_API_KEY`. The real `.env` file is excluded from version control.
 
 ## Example
 
 ```bash
-cd MCAE-Work
+cd examples
 python weather_example.py
 ```
 
@@ -63,9 +76,9 @@ Current coverage includes:
 - Open-Meteo network and HTTP failure handling
 - location disambiguation behavior
 - weather input validation
-- successful tool dispatch
-- unknown tool handling
+- successful and failed tool dispatch
 - malformed or invalid tool arguments
+- task-decomposition dispatch validation
 
 Run the same checks locally with:
 
