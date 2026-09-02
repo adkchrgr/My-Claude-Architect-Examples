@@ -7,13 +7,13 @@ import sys
 from pathlib import Path
 
 # Shared helper libraries live in lib/ at the repo root, not per-project.
+# These imports intentionally occur after the repo root is added to sys.path.
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from claude_agent_sdk import ClaudeAgentOptions, query
-
-from lib import agent_sdk_parser
+from claude_agent_sdk import ClaudeAgentOptions, query  # noqa: E402
+from lib import agent_sdk_parser  # noqa: E402
 
 
 async def main() -> None:
