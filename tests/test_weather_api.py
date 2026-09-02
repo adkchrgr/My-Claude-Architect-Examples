@@ -6,7 +6,7 @@ import httpx
 
 from conftest import load_module
 
-weather_api = load_module("MCAE-Work/weather_api.py", "weather_api_under_test")
+weather_api = load_module("examples/weather_api.py", "weather_api_under_test")
 
 
 def test_best_match_expands_us_state_abbreviation() -> None:
