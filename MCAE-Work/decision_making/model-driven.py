@@ -1,106 +1,150 @@
-import os
+"""Demonstrate model-driven tool selection with a bounded tool-use loop."""
+
+from __future__ import annotations
+
 import asyncio
-import random
-from pathlib import Path
-from dotenv import load_dotenv
 import json
+import os
+import random
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any
+
 from anthropic import AsyncAnthropic
+from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).parent.parent / ".env")
 
-# Two unrelated tools. Nothing in the code below tells Claude which one (if either)
-# to use for a given message -- that choice is made by the model at inference time,
-# based on the user's question and each tool's "description". That's the "model-driven"
-# part of this demo: the decision of *whether* to call a tool, *which* tool, and *how
-# many times* lives entirely in the model's output, not in our control flow.
+MODEL = "claude-haiku-4-5-20251001"
+MAX_TOKENS = 1024
+MAX_TURNS = 8
 
-def tool_magic_eyeball(question):
-  return random.choice(["Yes", "No", "Ask again later"])
 
-def tool_roll_dice(sides=6):
-  return str(random.randint(1, sides))
+def tool_magic_eyeball(question: str) -> str:
+    """Return a toy yes/no fortune response."""
+    _ = question
+    return random.choice(["Yes", "No", "Ask again later"])
 
-tools = [
-  {
-    "name": "magic_eyeball",
-    "description": "When the user asks a yes or no fortune telling question call this function",
-    "input_schema": {
-      "type": "object",
-      "properties": {
-        "question": {"type": "string"}
-      },
-      "required": ["question"]
-    }
-  },
-  {
-    "name": "roll_dice",
-    "description": "When the user wants to roll a die or asks for a random number for luck, call this function",
-    "input_schema": {
-      "type": "object",
-      "properties": {
-        "sides": {"type": "integer", "description": "Number of sides on the die, defaults to 6"}
-      },
-      "required": []
-    }
-  }
+
+def tool_roll_dice(sides: int = 6) -> str:
+    """Roll an n-sided die with basic input validation."""
+    if sides < 2 or sides > 1000:
+        raise ValueError("sides must be between 2 and 1000")
+    return str(random.randint(1, sides))
+
+
+TOOLS = [
+    {
+        "name": "magic_eyeball",
+        "description": "Use for yes-or-no fortune-telling questions.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"question": {"type": "string"}},
+            "required": ["question"],
+        },
+    },
+    {
+        "name": "roll_dice",
+        "description": "Use when the user wants to roll a die or asks for a random number for luck.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "sides": {
+                    "type": "integer",
+                    "minimum": 2,
+                    "maximum": 1000,
+                    "description": "Number of sides on the die. Defaults to 6.",
+                }
+            },
+            "required": [],
+        },
+    },
 ]
 
-# Maps a tool name Claude chooses back to the Python function that implements it.
-tool_functions = {
-  "magic_eyeball": tool_magic_eyeball,
-  "roll_dice": tool_roll_dice,
+TOOL_FUNCTIONS: dict[str, Callable[..., str]] = {
+    "magic_eyeball": tool_magic_eyeball,
+    "roll_dice": tool_roll_dice,
 }
 
-# Claude doesn't need this to figure out which tool to call -- the tool descriptions
-# above are already sufficient for that decision. This is here purely to show WHERE
-# a system prompt would go if you wanted to add steering on top of that decision
-# (tone, constraints, tie-breaking rules between overlapping tools, etc.).
-system_prompt = "You are a whimsical fortune-telling assistant. Use the tools available to you as needed to answer the user."
+SYSTEM_PROMPT = (
+    "You are a whimsical fortune-telling assistant. Use the tools available "
+    "to you as needed to answer the user."
+)
 
-model = "claude-haiku-4-5-20251001"
 
-async def create(client, messages):
-  return await client.messages.create(
-      model=model,
-      max_tokens=1024,
-      system=system_prompt,
-      tools=tools,
-      messages=messages,
-  )
+async def create(client: AsyncAnthropic, messages: list[dict[str, Any]]) -> object:
+    return await client.messages.create(
+        model=MODEL,
+        max_tokens=MAX_TOKENS,
+        system=SYSTEM_PROMPT,
+        tools=TOOLS,
+        messages=messages,
+    )
+
+
+def run_tool(name: str, tool_input: dict[str, Any]) -> tuple[str, bool]:
+    """Execute a model-selected tool and convert failures into tool-result data."""
+    handler = TOOL_FUNCTIONS.get(name)
+    if handler is None:
+        return f"Unknown tool: {name}", True
+
+    try:
+        return handler(**tool_input), False
+    except (TypeError, ValueError) as exc:
+        return f"Invalid arguments for {name}: {exc}", True
+    except Exception as exc:  # keep demo loop alive while surfacing the failure
+        return f"Tool {name} failed: {exc}", True
+
 
 async def main() -> None:
-  async with AsyncAnthropic(
-      api_key=os.environ.get("ANTHROPIC_API_KEY"),
-  ) as client:
-    user_message = "Hey Claude, will I be a billionaire living on Mars in 2026? Also roll me a 20-sided die for luck."
-    messages = [{"role": "user", "content": user_message}]
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise RuntimeError("ANTHROPIC_API_KEY is not set")
 
-    response = await create(client, messages)
-    print("round 1:")
-    print(json.dumps(response.model_dump(), indent=2))
+    async with AsyncAnthropic(api_key=api_key) as client:
+        user_message = (
+            "Hey Claude, will I be a billionaire living on Mars in 2026? "
+            "Also roll me a 20-sided die for luck."
+        )
+        messages: list[dict[str, Any]] = [{"role": "user", "content": user_message}]
 
-    # Loop for as long as Claude decides it wants to call tools. We don't assume a
-    # fixed number of rounds or a fixed set of tools -- we just keep responding to
-    # whatever stop_reason and tool_use blocks the model produces.
-    while response.stop_reason == "tool_use":
-      messages.append({"role": "assistant", "content": response.content})
+        for turn in range(1, MAX_TURNS + 1):
+            response = await create(client, messages)
+            print(f"round {turn}: stop_reason={response.stop_reason}")
+            print(json.dumps(response.model_dump(), indent=2))
 
-      tool_results = []
-      for block in response.content:
-        if block.type != "tool_use":
-          continue
-        func = tool_functions[block.name]
-        result = func(**block.input)
-        tool_results.append({
-            "type": "tool_result",
-            "tool_use_id": block.id,
-            "content": result,
-        })
+            if response.stop_reason == "end_turn":
+                return
 
-      messages.append({"role": "user", "content": tool_results})
+            if response.stop_reason != "tool_use":
+                print(f"Stopping on unexpected stop_reason={response.stop_reason!r}")
+                return
 
-      response = await create(client, messages)
-      print("follow up:")
-      print(json.dumps(response.model_dump(), indent=2))
+            messages.append({"role": "assistant", "content": response.content})
+            tool_results: list[dict[str, Any]] = []
 
-asyncio.run(main())
+            for block in response.content:
+                if block.type != "tool_use":
+                    continue
+
+                result, is_error = run_tool(block.name, block.input)
+                result_block: dict[str, Any] = {
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": result,
+                }
+                if is_error:
+                    result_block["is_error"] = True
+                tool_results.append(result_block)
+
+            if not tool_results:
+                print("Model reported tool_use but emitted no tool calls; stopping.")
+                return
+
+            messages.append({"role": "user", "content": tool_results})
+
+        print(f"Reached MAX_TURNS ({MAX_TURNS}) without end_turn; stopping.")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
