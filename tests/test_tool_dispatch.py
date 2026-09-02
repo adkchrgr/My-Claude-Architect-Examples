@@ -5,7 +5,7 @@ from __future__ import annotations
 from conftest import load_module
 
 loop_example = load_module(
-    "MCAE-Work/end_loop_correctly/main.py",
+    "examples/end_loop_correctly/main.py",
     "end_loop_example_under_test",
 )
 
