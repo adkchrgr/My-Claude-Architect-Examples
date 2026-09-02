@@ -1,1 +1,1 @@
-Please use Haiku modle for api calls to keep costs low
+Please use the Haiku model for API calls to keep costs low.
