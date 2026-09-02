@@ -1,172 +1,217 @@
-import os
+"""Basic orchestrator-workers example using Claude for decomposition and aggregation."""
+
+from __future__ import annotations
+
 import asyncio
+import os
 from pathlib import Path
-from dotenv import load_dotenv
+from typing import Any
+
 from anthropic import AsyncAnthropic
+from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).parent.parent / ".env")
 
-# Coordinator agent (orchestrator-workers pattern).
-#
-# The coordinator model does three things, and every one of those decisions
-# lives in the model's output -- not in our control flow:
-#
-#   1. DECOMPOSITION            -- split the request into atomic sub-tasks
-#   2. COMPLEXITY + ROUTING     -- tag each sub-task simple/complex; Python routes
-#                                  it to a cheap fast worker or a deliberate one
-#   3. AGGREGATION              -- synthesize the workers' answers into one reply
-#
-# The only thing that lives in code is the routing table below.
-
 COORDINATOR_MODEL = "claude-haiku-4-5-20251001"
-
-# The "complex" lane would point at a stronger model (e.g. Sonnet) in production;
-# kept on Haiku here to keep costs low.
 WORKER_MODEL = {
-  "simple": "claude-haiku-4-5-20251001",
-  "complex": "claude-haiku-4-5-20251001",
+    "simple": "claude-haiku-4-5-20251001",
+    "complex": "claude-haiku-4-5-20251001",
 }
-
 WORKER_SYSTEM = {
-  "simple": "You are a fast worker. Answer in 2-3 sentences. No preamble.",
-  "complex": (
-    "You are a senior analyst. Give a rigorous, structured answer that names the "
-    "relevant trade-offs and ends with a clear bottom line."
-  ),
-}
-
-WORKER_MAX_TOKENS = {"simple": 300, "complex": 1024}
-
-# Per-spoke resilience: each worker call is retried on failure with exponential
-# backoff before the hub gives up on that spoke.
-WORKER_MAX_ATTEMPTS = 3
-WORKER_RETRY_BASE_DELAY = 1.0  # seconds; doubled each attempt
-
-# The coordinator's single tool. It decomposes the request in its own reasoning,
-# then calls this once per sub-task -- fanning out multiple calls in one turn for
-# independent sub-tasks. `complexity` is the model's routing decision.
-tools = [
-  {
-    "name": "dispatch_worker",
-    "description": (
-      "Delegate ONE atomic sub-task to a worker. Call this once per sub-task you "
-      "have broken the request into; emit all calls for independent sub-tasks in "
-      "the same turn to fan out. Set complexity to 'simple' for lookups or short "
-      "factual answers, or 'complex' for anything needing analysis, trade-offs, "
-      "or judgment."
+    "simple": "You are a fast worker. Answer in 2-3 sentences. No preamble.",
+    "complex": (
+        "You are a senior analyst. Give a rigorous, structured answer that names "
+        "the relevant trade-offs and ends with a clear bottom line."
     ),
-    "input_schema": {
-      "type": "object",
-      "properties": {
-        "subtask": {"type": "string", "description": "Self-contained instruction for the worker"},
-        "complexity": {"type": "string", "enum": ["simple", "complex"]},
-      },
-      "required": ["subtask", "complexity"],
-    },
-  }
+}
+WORKER_MAX_TOKENS = {"simple": 300, "complex": 1024}
+WORKER_MAX_ATTEMPTS = 3
+WORKER_RETRY_BASE_DELAY = 1.0
+MAX_COORDINATOR_TURNS = 6
+
+TOOLS = [
+    {
+        "name": "dispatch_worker",
+        "description": (
+            "Delegate ONE atomic sub-task to a worker. Call this once per sub-task; "
+            "emit all independent calls in the same turn. Set complexity to simple "
+            "for short factual work and complex for analysis, trade-offs, or judgment."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "subtask": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Self-contained instruction for the worker",
+                },
+                "complexity": {"type": "string", "enum": ["simple", "complex"]},
+            },
+            "required": ["subtask", "complexity"],
+        },
+    }
 ]
 
 COORDINATOR_SYSTEM = (
-  "You are a coordinator agent. When you receive a request:\n"
-  "1. Decompose it into the smallest useful set of independent sub-tasks.\n"
-  "2. Judge each sub-task's complexity and call dispatch_worker for it. Emit all "
-  "dispatch_worker calls for independent sub-tasks in the same turn.\n"
-  "3. Once every worker has reported back, aggregate their answers into a single "
-  "coherent response for the user -- resolve conflicts, drop redundancy, and make "
-  "an explicit recommendation when one was asked for. If a worker returned an "
-  "error, either re-dispatch that sub-task or proceed and note the gap explicitly."
+    "You are a coordinator agent. When you receive a request:\n"
+    "1. Decompose it into the smallest useful set of independent sub-tasks.\n"
+    "2. Judge each sub-task's complexity and call dispatch_worker for it. Emit all "
+    "independent dispatches in the same turn.\n"
+    "3. Once workers report back, aggregate their answers into one coherent response. "
+    "Resolve conflicts, drop redundancy, and make an explicit recommendation when "
+    "one was requested. If a worker fails, either re-dispatch or clearly note the gap."
 )
 
 
-async def run_worker(client, subtask: str, complexity: str) -> str:
-  """Run one spoke, retrying that spoke alone on failure. Raises if every
-  attempt fails -- the caller decides how to degrade."""
-  last_error = None
-  for attempt in range(1, WORKER_MAX_ATTEMPTS + 1):
-    try:
-      response = await client.messages.create(
-        model=WORKER_MODEL[complexity],
-        max_tokens=WORKER_MAX_TOKENS[complexity],
-        system=WORKER_SYSTEM[complexity],
-        messages=[{"role": "user", "content": subtask}],
-      )
-      return "".join(b.text for b in response.content if hasattr(b, "text"))
-    except Exception as e:  # noqa: BLE001 -- retry any transient failure
-      last_error = e
-      if attempt < WORKER_MAX_ATTEMPTS:
-        delay = WORKER_RETRY_BASE_DELAY * (2 ** (attempt - 1))
-        print(f"    worker attempt {attempt} failed ({e!r}); retrying in {delay:.0f}s")
-        await asyncio.sleep(delay)
-  raise last_error
+def validate_dispatch(tool_input: dict[str, Any]) -> tuple[str, str]:
+    subtask = tool_input.get("subtask")
+    complexity = tool_input.get("complexity")
+    if not isinstance(subtask, str) or not subtask.strip():
+        raise ValueError("subtask must be a non-empty string")
+    if complexity not in WORKER_MODEL:
+        raise ValueError(f"unsupported complexity {complexity!r}")
+    return subtask.strip(), complexity
 
 
-async def create(client, messages):
-  return await client.messages.create(
-    model=COORDINATOR_MODEL,
-    max_tokens=2048,
-    system=COORDINATOR_SYSTEM,
-    tools=tools,
-    messages=messages,
-  )
+async def run_worker(client: AsyncAnthropic, subtask: str, complexity: str) -> str:
+    """Run one worker with per-worker retries and exponential backoff."""
+    last_error: Exception | None = None
+
+    for attempt in range(1, WORKER_MAX_ATTEMPTS + 1):
+        try:
+            response = await client.messages.create(
+                model=WORKER_MODEL[complexity],
+                max_tokens=WORKER_MAX_TOKENS[complexity],
+                system=WORKER_SYSTEM[complexity],
+                messages=[{"role": "user", "content": subtask}],
+            )
+            text = "".join(
+                block.text
+                for block in response.content
+                if getattr(block, "type", None) == "text"
+            ).strip()
+            return text or "(worker returned no text)"
+        except Exception as exc:  # demo retries transport/API failures at this boundary
+            last_error = exc
+            if attempt < WORKER_MAX_ATTEMPTS:
+                delay = WORKER_RETRY_BASE_DELAY * (2 ** (attempt - 1))
+                print(f"    worker attempt {attempt} failed ({exc!r}); retrying in {delay:.0f}s")
+                await asyncio.sleep(delay)
+
+    raise RuntimeError("worker failed after all retry attempts") from last_error
+
+
+async def create_coordinator(client: AsyncAnthropic, messages: list[dict[str, Any]]) -> object:
+    return await client.messages.create(
+        model=COORDINATOR_MODEL,
+        max_tokens=2048,
+        system=COORDINATOR_SYSTEM,
+        tools=TOOLS,
+        messages=messages,
+    )
 
 
 async def main() -> None:
-  async with AsyncAnthropic(
-      api_key=os.environ.get("ANTHROPIC_API_KEY"),
-  ) as client:
-    user_message = (
-      "We're choosing a database for a new service that needs high write "
-      "throughput, occasional analytical queries, and strong durability. "
-      "Compare PostgreSQL, MongoDB, and Cassandra for this workload and "
-      "recommend one."
-    )
-    messages = [{"role": "user", "content": user_message}]
-    print(f"User: {user_message}\n")
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise RuntimeError("ANTHROPIC_API_KEY is not set")
 
-    response = await create(client, messages)
+    async with AsyncAnthropic(api_key=api_key) as client:
+        user_message = (
+            "We're choosing a database for a new service that needs high write "
+            "throughput, occasional analytical queries, and strong durability. "
+            "Compare PostgreSQL, MongoDB, and Cassandra for this workload and recommend one."
+        )
+        messages: list[dict[str, Any]] = [{"role": "user", "content": user_message}]
+        print(f"User: {user_message}\n")
 
-    while response.stop_reason == "tool_use":
-      messages.append({"role": "assistant", "content": response.content})
+        for coordinator_turn in range(1, MAX_COORDINATOR_TURNS + 1):
+            response = await create_coordinator(client, messages)
 
-      dispatches = [b for b in response.content if b.type == "tool_use"]
+            if response.stop_reason == "end_turn":
+                final_text = "".join(
+                    block.text
+                    for block in response.content
+                    if getattr(block, "type", None) == "text"
+                ).strip()
+                print("\n[AGGREGATION] coordinator synthesized the worker outputs:\n")
+                print(final_text or "(no text)")
+                return
 
-      print(f"[DECOMPOSITION] coordinator split the request into {len(dispatches)} sub-task(s):")
-      for b in dispatches:
-        print(f"  - ({b.input['complexity']}) {b.input['subtask']}")
+            if response.stop_reason != "tool_use":
+                print(f"Stopping on unexpected stop_reason={response.stop_reason!r}")
+                return
 
-      print("\n[ROUTING] running workers in parallel...")
-      # return_exceptions=True so one failed spoke doesn't sink the whole batch;
-      # the hub still gets every other worker's result and reports the failure
-      # back to the coordinator as a tool error.
-      worker_outputs = await asyncio.gather(*(
-        run_worker(client, b.input["subtask"], b.input["complexity"])
-        for b in dispatches
-      ), return_exceptions=True)
+            messages.append({"role": "assistant", "content": response.content})
+            dispatches = [block for block in response.content if block.type == "tool_use"]
+            if not dispatches:
+                print("Coordinator reported tool_use but emitted no tool calls; stopping.")
+                return
 
-      tool_results = []
-      for b, output in zip(dispatches, worker_outputs):
-        if isinstance(output, Exception):
-          print(f"  FAILED: {b.input['subtask'][:70]} -- {output!r}")
-          tool_results.append({
-            "type": "tool_result",
-            "tool_use_id": b.id,
-            "content": f"Worker failed after {WORKER_MAX_ATTEMPTS} attempts: {output!r}",
-            "is_error": True,
-          })
-        else:
-          print(f"  done: {b.input['subtask'][:70]}")
-          tool_results.append({
-            "type": "tool_result",
-            "tool_use_id": b.id,
-            "content": output,
-          })
+            print(f"[DECOMPOSITION] coordinator emitted {len(dispatches)} sub-task(s):")
+            parsed_dispatches: list[tuple[object, str, str]] = []
+            immediate_errors: list[dict[str, Any]] = []
 
-      messages.append({"role": "user", "content": tool_results})
-      response = await create(client, messages)
+            for block in dispatches:
+                if block.name != "dispatch_worker":
+                    immediate_errors.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": block.id,
+                            "content": f"Unknown coordinator tool: {block.name}",
+                            "is_error": True,
+                        }
+                    )
+                    continue
 
-    print("\n[AGGREGATION] coordinator synthesized the worker outputs:\n")
-    final_text = "".join(b.text for b in response.content if hasattr(b, "text"))
-    print(final_text or "(no text)")
+                try:
+                    subtask, complexity = validate_dispatch(block.input)
+                except ValueError as exc:
+                    immediate_errors.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": block.id,
+                            "content": f"Invalid dispatch: {exc}",
+                            "is_error": True,
+                        }
+                    )
+                    continue
+
+                print(f"  - ({complexity}) {subtask}")
+                parsed_dispatches.append((block, subtask, complexity))
+
+            print("\n[ROUTING] running valid workers in parallel...")
+            outputs = await asyncio.gather(
+                *(run_worker(client, subtask, complexity) for _, subtask, complexity in parsed_dispatches),
+                return_exceptions=True,
+            )
+
+            tool_results = list(immediate_errors)
+            for (block, subtask, _), output in zip(parsed_dispatches, outputs):
+                if isinstance(output, Exception):
+                    print(f"  FAILED: {subtask[:70]} -- {output!r}")
+                    tool_results.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": block.id,
+                            "content": f"Worker failed after {WORKER_MAX_ATTEMPTS} attempts: {output!r}",
+                            "is_error": True,
+                        }
+                    )
+                else:
+                    print(f"  done: {subtask[:70]}")
+                    tool_results.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": block.id,
+                            "content": output,
+                        }
+                    )
+
+            messages.append({"role": "user", "content": tool_results})
+
+        print(f"Reached MAX_COORDINATOR_TURNS ({MAX_COORDINATOR_TURNS}) without end_turn; stopping.")
 
 
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())
