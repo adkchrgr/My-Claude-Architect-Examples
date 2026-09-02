@@ -1,17 +1,21 @@
-import os
+"""Demonstrate code-driven routing around an LLM classification step."""
+
+from __future__ import annotations
+
 import asyncio
-from pathlib import Path
-from dotenv import load_dotenv
 import json
+import os
+import random
+from pathlib import Path
+
 from anthropic import AsyncAnthropic
+from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).parent.parent / ".env")
 
-def tool_magic_eyeball(question):
-  import random
-  return random.choice(["Yes", "No", "Ask again later"])
-
-model = "claude-haiku-4-5-20251001"
+MODEL = "claude-haiku-4-5-20251001"
+MAX_TOKENS = 1024
+VALID_CATEGORIES = {"FORTUNE", "OTHER"}
 
 CLASSIFY_PROMPT = """Classify the user's message into exactly one category. Respond with only the category name, nothing else.
 
@@ -21,37 +25,72 @@ Categories:
 
 User message: {question}"""
 
-async def create(client, messages):
-  return await client.messages.create(
-      model=model,
-      max_tokens=1024,
-      messages=messages,
-  )
+
+def tool_magic_eyeball(_: str) -> str:
+    """Return a deliberately toy fortune response for the routing demo."""
+    return random.choice(["Yes", "No", "Ask again later"])
+
+
+async def create(client: AsyncAnthropic, messages: list[dict]) -> object:
+    return await client.messages.create(
+        model=MODEL,
+        max_tokens=MAX_TOKENS,
+        messages=messages,
+    )
+
+
+def extract_text(response: object) -> str:
+    """Collect text blocks from a Messages API response."""
+    return "".join(
+        block.text for block in response.content if getattr(block, "type", None) == "text"
+    ).strip()
+
 
 async def main() -> None:
-  async with AsyncAnthropic(
-      api_key=os.environ.get("ANTHROPIC_API_KEY"),
-  ) as client:
-    user_message = "Hey Claude, will I be a billionaire living on Mars in 2026?"
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise RuntimeError("ANTHROPIC_API_KEY is not set")
 
-    classify_messages = [{"role": "user", "content": CLASSIFY_PROMPT.format(question=user_message)}]
-    classify_response = await create(client, classify_messages)
-    category = classify_response.content[0].text.strip()
-    print(f"classification: {category}")
+    async with AsyncAnthropic(api_key=api_key) as client:
+        user_message = "Hey Claude, will I be a billionaire living on Mars in 2026?"
 
-    # Hardcoded decision tree: the branch taken is decided in code by
-    # inspecting the LLM's plain-text output, not by the model choosing a tool.
-    if category == "FORTUNE":
-      fortune = tool_magic_eyeball(user_message)
-      print(f"magic eyeball says: {fortune}")
-      messages = [
-          {"role": "user", "content": f"{user_message}\n\n(The magic eyeball says: {fortune}. Give the user a fun, in-character answer based on this.)"},
-      ]
-    else:
-      messages = [{"role": "user", "content": user_message}]
+        classify_messages = [
+            {
+                "role": "user",
+                "content": CLASSIFY_PROMPT.format(question=user_message),
+            }
+        ]
+        classify_response = await create(client, classify_messages)
+        category = extract_text(classify_response).upper()
 
-    response = await create(client, messages)
-    print('final answer:')
-    print(json.dumps(response.model_dump(), indent=2))
+        if category not in VALID_CATEGORIES:
+            print(f"classification was unexpected ({category!r}); defaulting to OTHER")
+            category = "OTHER"
+        else:
+            print(f"classification: {category}")
 
-asyncio.run(main())
+        # The branch itself is deterministic application code. The model only
+        # supplies the classification value consumed by the decision tree.
+        if category == "FORTUNE":
+            fortune = tool_magic_eyeball(user_message)
+            print(f"magic eyeball says: {fortune}")
+            messages = [
+                {
+                    "role": "user",
+                    "content": (
+                        f"{user_message}\n\n"
+                        f"(The magic eyeball says: {fortune}. Give the user a fun, "
+                        "in-character answer based on this.)"
+                    ),
+                }
+            ]
+        else:
+            messages = [{"role": "user", "content": user_message}]
+
+        response = await create(client, messages)
+        print("final answer:")
+        print(json.dumps(response.model_dump(), indent=2))
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
