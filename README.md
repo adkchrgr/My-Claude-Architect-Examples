@@ -1,5 +1,7 @@
 # Claude Agent Patterns
 
+![CI](https://github.com/adkchrgr/My-Claude-Architect-Examples/actions/workflows/ci.yml/badge.svg)
+
 Runnable Python experiments exploring how Claude-based applications behave beyond a single API request.
 
 I'm building these while working through Claude architecture material. The goal is not simply to complete exercises, but to understand the control flow, failure modes, and engineering tradeoffs involved in building reliable agentic systems.
@@ -52,20 +54,42 @@ python weather_example.py
 
 The weather example demonstrates a full tool-use loop using live data from Open-Meteo: Claude requests the tool, Python executes it, the result is appended to the message history, and Claude completes the answer on a later turn.
 
+## Tests and CI
+
+The automated tests focus on deterministic application behavior and external boundaries without making live Anthropic API calls. This keeps CI fast, repeatable, and free of API-key requirements.
+
+Current coverage includes:
+
+- Open-Meteo network and HTTP failure handling
+- location disambiguation behavior
+- weather input validation
+- successful tool dispatch
+- unknown tool handling
+- malformed or invalid tool arguments
+
+Run the same checks locally with:
+
+```bash
+pip install -r requirements-dev.txt
+ruff check .
+pytest -v
+```
+
+GitHub Actions runs the lint and test suite automatically on every push and pull request.
+
 ## Production Considerations
 
 These are learning implementations rather than production services.
 
 Areas I'm progressively adding include:
 
-- automated tests and mocked API responses
+- broader automated test coverage
 - structured logging
 - consistent exception handling
 - bounded retries and exponential backoff
 - tool-input validation
 - explicit loop limits
 - configurable model selection
-- linting and CI
 - tracing and evaluation
 
 ## Why I'm Building This
