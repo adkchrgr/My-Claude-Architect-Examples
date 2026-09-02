@@ -1,2 +1,3 @@
-anthropic>=0.40
-python-dotenv
+anthropic[aiohttp]>=0.40
+httpx>=0.27
+python-dotenv>=1.0
